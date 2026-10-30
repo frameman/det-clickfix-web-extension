@@ -42,5 +42,7 @@ Separately, the page scanner (`content.js`) rates the page itself as Review, Med
 
 ##Demo
 ![Video](https://github.com/frameman/det-clickfix-web-extension/blob/main/demo.gif)
+
+
 Reference example form AnyRun
 link: https://app.any.run/tasks/823d8b34-36ca-42c1-86d1-dd493f1cc98c/
