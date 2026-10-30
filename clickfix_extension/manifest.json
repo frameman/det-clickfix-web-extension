@@ -1,32 +1,31 @@
 {
   "manifest_version": 3,
   "name": "ClickFix Guard",
-  "version": "1.1.0",
-  "description": "Detects suspicious fake verification pages and ClickFix-style operating-system instructions.",
-  "permissions": [
-    "clipboardWrite"
-  ],
-  "host_permissions": [
-    "http://*/*",
-    "https://*/*"
-  ],
+  "version": "2.0.0",
+  "description": "Detects ClickFix-style fake verification pages and blocks or warns on suspicious clipboard writes (PowerShell/cmd/download-and-execute, base-N obfuscation).",
+  "minimum_chrome_version": "114",
+  "permissions": ["clipboardWrite", "storage"],
+  "host_permissions": ["http://*/*", "https://*/*"],
   "content_scripts": [
     {
-      "matches": [
-        "http://*/*",
-        "https://*/*"
-      ],
-      "js": [
-        "content.js"
-      ],
-      "css": [
-        "content.css"
-      ],
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["clipboard-hook.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "world": "MAIN"
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
       "run_at": "document_start",
       "all_frames": true
     }
   ],
-  "action": {
-    "default_title": "ClickFix Guard"
-  }
+  "action": { "default_title": "ClickFix Guard" },
+
+    "web_accessible_resources": [
+    { "resources": ["warning.html", "warning.js"], "matches": ["http://*/*", "https://*/*"] }
+  ]
 }

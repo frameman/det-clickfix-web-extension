@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Blocked by ClickFix Guard</title>
+<style>
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#fef3f2;font:16px/1.5 Arial,Helvetica,sans-serif;color:#202124}
+  .box{max-width:520px;margin:24px;padding:32px;background:#fff;border:2px solid #b42318;border-radius:14px;box-shadow:0 8px 28px rgba(0,0,0,.2)}
+  h1{margin:0 0 12px;color:#b42318;font-size:24px}
+  .site{margin:14px 0;padding:8px 10px;background:#f2f4f7;border-radius:6px;font-size:13px;word-break:break-all}
+  button{border:0;border-radius:6px;padding:10px 16px;font-size:15px;font-weight:600;cursor:pointer}
+  #back{background:#b42318;color:#fff}
+  #go{background:transparent;color:#667085;margin-left:8px;font-weight:400;text-decoration:underline}
+</style>
+</head>
+<body>
+  <div class="box">
+    <h1>&#9888; ClickFix scam blocked</h1>
+    <p>This page is a ClickFix scam: a fake &ldquo;verification&rdquo; page that tricks you into pasting a malicious command into Run, PowerShell or Terminal.</p>
+    <div class="site" id="site"></div>
+    <button id="back">Go back to safety</button>
+    <button id="go">Continue anyway (not recommended)</button>
+  </div>
+  <script src="warning.js"></script>
+</body>
+</html>
