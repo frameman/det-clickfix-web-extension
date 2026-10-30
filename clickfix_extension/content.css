@@ -1,4 +1,4 @@
-/* The visible warning is rendered inside a Shadow DOM. This file is intentionally minimal. */
+/* The warning panel is rendered inside a Shadow DOM. */
 #clickfix-guard-alert {
   all: initial !important;
   position: fixed !important;

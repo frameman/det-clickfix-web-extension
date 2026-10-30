@@ -1,37 +1,48 @@
 (() => {
   "use strict";
 
-  // Avoid duplicate injection if a page or extension reload causes a second run.
+  // Prevent duplicate execution in the same frame.
   if (window.__clickFixGuardLoaded) return;
   window.__clickFixGuardLoaded = true;
 
   const CONFIG = {
-    // Keep this small to avoid repeatedly scanning huge pages.
     maxTextLength: 180000,
-    debounceMs: 180,
-    minAlertScore: 5
+    maxScriptLength: 80000,
+    maxSingleScriptLength: 20000,
+    debounceMs: 200,
+    minAlertScore: 7
   };
+
+  const ACTION_IDS = new Set([
+    "os-shortcut",
+    "open-system-tool",
+    "paste-command",
+    "execution-language"
+  ]);
 
   const RULES = [
     {
-      id: "fake-captcha-language",
+      id: "verification-language",
       score: 2,
       label: "Human-verification wording",
       regex: /\b(?:i['’]?m not a robot|i am not a robot|verify you are human|human verification|complete these verification steps|security verification)\b/i
     },
     {
-      id: "fake-captcha-branding",
-      score: 2,
-      label: "CAPTCHA-like overlay or branding",
+      id: "captcha-widget",
+      score: 1,
+      label: "CAPTCHA-like page element",
       selector: [
-        ".cjs-container", ".checkbox-window", ".verify-window",
-        "[id*='captcha' i]", "[class*='captcha' i]",
+        ".cjs-container",
+        ".checkbox-window",
+        ".verify-window",
+        "[id*='captcha' i]",
+        "[class*='captcha' i]",
         "[aria-label*='captcha' i]"
       ].join(",")
     },
     {
       id: "os-shortcut",
-      score: 5,
+      score: 4,
       label: "Instruction to use a Windows shortcut",
       regex: /\b(?:press|hold|use|hit)\b.{0,45}\b(?:windows?\s*(?:key|button)?|win)\b.{0,35}(?:\+\s*(?:x|r)|power\s*user|run\s*dialog)\b|\b(?:windows?\s*key|win)\s*\+\s*(?:x|r)\b/i
     },
@@ -43,130 +54,172 @@
     },
     {
       id: "paste-command",
-      score: 5,
+      score: 4,
       label: "Instruction to copy or paste a command",
       regex: /\b(?:copy|paste|type|enter)\b.{0,70}\b(?:command|code|script|powershell|cmd(?:\.exe)?|terminal)\b|\b(?:copy and paste|paste the following|paste this command)\b/i
     },
     {
       id: "execution-language",
-      score: 3,
+      score: 4,
       label: "Command execution wording",
-      regex: /\b(?:press\s+enter\s+to\s+run|execute\s+the\s+command|run\s+the\s+following|powershell(?:\.exe)?\s+-|cmd(?:\.exe)?\s+\/c)\b/i
+      regex: /\b(?:press\s+enter\s+to\s+run|execute\s+the command|run\s+the following|powershell(?:\.exe)?\s+-|cmd(?:\.exe)?\s+\/c)\b/i
     },
     {
       id: "clipboard-api",
-      score: 3,
-      label: "Page references clipboard access",
-      scriptRegex: /navigator\.clipboard|clipboard\.writeText|document\.execCommand\s*\(\s*['"]copy/i
+      score: 2,
+      label: "Inline script references clipboard access",
+      scriptRegex: /navigator\s*\.\s*clipboard|clipboard\s*\.\s*writeText|document\.execCommand\s*\(\s*['"]copy/i
     },
     {
       id: "obfuscated-script",
       score: 2,
-      label: "Obfuscated or dynamically decoded script",
+      label: "Inline script contains common decoding or obfuscation patterns",
       scriptRegex: /\beval\s*\(\s*(?:atob|decodeURIComponent)|atob\s*\(|data:text\/javascript;base64,/i
     }
   ];
 
   let scanTimer = null;
   let lastSignature = "";
-  let clipboardClearAttempted = false;
+  let lastRenderedSignature = "";
+  let dismissedSignature = "";
   let alertNode = null;
   let shadowRoot = null;
+  let observer = null;
 
-  function safeText() {
-    const bodyText = document.body?.innerText || document.documentElement?.innerText || "";
-    return bodyText.slice(0, CONFIG.maxTextLength);
+  function getPageText() {
+    const source = document.body?.innerText ||
+      document.documentElement?.innerText || "";
+    return source.slice(0, CONFIG.maxTextLength);
   }
 
-  function getPageScripts() {
-    let out = "";
-    for (const script of document.scripts || []) {
+  function getInlineScripts() {
+    let output = "";
+
+    for (const script of document.querySelectorAll("script:not([src])")) {
       const value = script.textContent || "";
-      if (value) out += value.slice(0, 20000) + "\n";
-      if (out.length > 80000) break;
+      if (!value) continue;
+
+      output += value.slice(0, CONFIG.maxSingleScriptLength) + "\n";
+      if (output.length >= CONFIG.maxScriptLength) break;
     }
-    return out;
-  }
 
-  function detectFakeCaptcha(text) {
-    const selectors = [
-      ".cjs-container", ".checkbox-window", ".verify-window",
-      "[id*='captcha' i]", "[class*='captcha' i]"
-    ];
-    const hasCaptchaElement = selectors.some(sel => {
-      try { return !!document.querySelector(sel); } catch { return false; }
-    });
-
-    const hasVerificationText =
-      /\b(?:i['’]?m not a robot|i am not a robot|complete these verification steps|verify you are human|human verification)\b/i.test(text);
-
-    // A CAPTCHA-like widget alone is not enough to call ClickFix.
-    return hasCaptchaElement || hasVerificationText;
+    return output.slice(0, CONFIG.maxScriptLength);
   }
 
   function collectEvidence(text, scripts) {
     const evidence = [];
     let score = 0;
-    const fakeCaptcha = detectFakeCaptcha(text);
 
     for (const rule of RULES) {
       let matched = false;
 
-      if (rule.regex && rule.regex.test(text)) matched = true;
+      if (rule.regex?.test(text)) matched = true;
+
       if (rule.selector) {
-        try { if (document.querySelector(rule.selector)) matched = true; } catch {}
+        try {
+          if (document.querySelector(rule.selector)) matched = true;
+        } catch {
+          // Ignore invalid or unsupported selectors.
+        }
       }
-      if (rule.scriptRegex && rule.scriptRegex.test(scripts)) matched = true;
+
+      if (rule.scriptRegex?.test(scripts)) matched = true;
 
       if (matched) {
-        evidence.push({ id: rule.id, label: rule.label, score: rule.score });
+        evidence.push({
+          id: rule.id,
+          label: rule.label,
+          score: rule.score
+        });
         score += rule.score;
       }
     }
 
-    // Strongly prioritize the combination: fake verification + OS/command instructions.
-    const hasOSOrCommandEvidence = evidence.some(e =>
-      ["os-shortcut", "open-system-tool", "paste-command", "execution-language"].includes(e.id)
-    );
+    const ids = new Set(evidence.map(item => item.id));
+    const hasVerificationContext =
+      ids.has("verification-language") || ids.has("captcha-widget");
 
-    if (fakeCaptcha && hasOSOrCommandEvidence) score += 3;
+    const actionEvidence = evidence.filter(item => ACTION_IDS.has(item.id));
+    const hasActionInstructions = actionEvidence.length > 0;
 
-    // A normal CAPTCHA should not be labeled ClickFix just because it says "I'm not a robot".
+    // A CAPTCHA element or verification phrase alone must not trigger an alert.
+    // Require verification context plus concrete operating-system/command instructions.
+    const hasClickFixCombination =
+      hasVerificationContext && hasActionInstructions;
+
+    // A secondary review signal catches pages that combine command instructions
+    // with suspicious inline clipboard/obfuscation code, even without CAPTCHA wording.
+    const hasScriptSupport =
+      ids.has("clipboard-api") || ids.has("obfuscated-script");
+
     let level = "No alert";
-    if (score >= 9 && fakeCaptcha && hasOSOrCommandEvidence) level = "High";
-    else if (score >= CONFIG.minAlertScore && hasOSOrCommandEvidence) level = "Medium";
-    else if (fakeCaptcha && hasOSOrCommandEvidence) level = "Medium";
-    else if (score >= 7) level = "Review";
 
-    return { score, level, evidence, fakeCaptcha, hasOSOrCommandEvidence };
+    if (hasClickFixCombination && score >= 11) {
+      level = "High";
+    } else if (hasClickFixCombination && score >= CONFIG.minAlertScore) {
+      level = "Medium";
+    } else if (actionEvidence.length > 0 && hasScriptSupport && score >= 8) {
+      level = "Review";
+    }
+
+    return {
+      score,
+      level,
+      evidence,
+      hasVerificationContext,
+      hasActionInstructions,
+      hasClickFixCombination
+    };
+  }
+
+  function removeAlert() {
+    if (alertNode?.isConnected) alertNode.remove();
+    alertNode = null;
+    shadowRoot = null;
   }
 
   function ensureAlert() {
-    if (alertNode?.isConnected) return;
+    if (alertNode?.isConnected && shadowRoot) return;
+
     alertNode = document.createElement("div");
     alertNode.id = "clickfix-guard-alert";
     alertNode.setAttribute("role", "status");
     alertNode.setAttribute("aria-live", "polite");
 
-    // Shadow DOM prevents site CSS from restyling the warning.
     shadowRoot = alertNode.attachShadow({ mode: "open" });
+
     const style = document.createElement("style");
     style.textContent = `
       :host { all: initial; }
       .cfx-panel {
         box-sizing: border-box; width: 100%; padding: 16px;
         border: 1px solid #b42318; border-radius: 12px;
-        background: #fff; color: #202124; box-shadow: 0 8px 28px rgba(0,0,0,.25);
+        background: #fff; color: #202124;
+        box-shadow: 0 8px 28px rgba(0,0,0,.25);
         font: 14px/1.45 Arial, Helvetica, sans-serif;
       }
-      .cfx-top { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+      .cfx-top {
+        display:flex; align-items:center; justify-content:space-between; gap:12px;
+      }
       .cfx-title { font-size: 15px; font-weight: 700; }
-      .cfx-close { border:0; background:transparent; color:#555; cursor:pointer; font-size:24px; line-height:1; }
+      .cfx-close {
+        border:0; background:transparent; color:#555;
+        cursor:pointer; font-size:24px; line-height:1;
+      }
       .cfx-level { margin-top:10px; font-weight:700; color:#b42318; }
       .cfx-summary { margin:8px 0; }
       .cfx-evidence { margin:8px 0; padding-left:20px; }
       .cfx-evidence li { margin:4px 0; }
-      .cfx-note { margin:10px 0 0; padding-top:9px; border-top:1px solid #ddd; font-size:12px; color:#555; }
+      .cfx-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+      .cfx-clear {
+        border:0; border-radius:6px; padding:8px 11px;
+        background:#b42318; color:#fff; cursor:pointer; font-weight:600;
+      }
+      .cfx-clear:disabled { opacity:.65; cursor:wait; }
+      .cfx-note {
+        margin:10px 0 0; padding-top:9px; border-top:1px solid #ddd;
+        font-size:12px; color:#555;
+      }
       .cfx-panel[data-level="medium"] { border-color:#b54708; }
       .cfx-panel[data-level="medium"] .cfx-level { color:#b54708; }
       .cfx-panel[data-level="review"] { border-color:#667085; }
@@ -174,9 +227,9 @@
     `;
     shadowRoot.appendChild(style);
 
-    const wrapper = document.createElement("div");
-    wrapper.className = "cfx-panel";
-    wrapper.innerHTML = `
+    const panel = document.createElement("section");
+    panel.className = "cfx-panel";
+    panel.innerHTML = `
       <div class="cfx-top">
         <strong class="cfx-title">ClickFix Guard</strong>
         <button type="button" class="cfx-close" aria-label="Dismiss warning">×</button>
@@ -184,35 +237,47 @@
       <div class="cfx-level"></div>
       <p class="cfx-summary"></p>
       <ul class="cfx-evidence"></ul>
-      <p class="cfx-note">Do not paste commands into Run, PowerShell, or Terminal to complete a CAPTCHA. Clipboard clearing is attempted automatically only when strong ClickFix indicators are detected.</p>
+      <div class="cfx-actions">
+        <button type="button" class="cfx-clear">Clear clipboard</button>
+      </div>
+      <p class="cfx-note">
+        Do not paste commands into Run, PowerShell, or Terminal to complete a CAPTCHA.
+        Clipboard clearing requires your explicit click.
+      </p>
     `;
-    shadowRoot.appendChild(wrapper);
+    shadowRoot.appendChild(panel);
 
     shadowRoot.querySelector(".cfx-close").addEventListener("click", () => {
-      alertNode?.remove();
-      alertNode = null;
-      shadowRoot = null;
+      dismissedSignature = lastSignature;
+      removeAlert();
     });
+    shadowRoot.querySelector(".cfx-clear").addEventListener("click", clearClipboardFromUserAction);
 
     (document.documentElement || document).appendChild(alertNode);
   }
 
   function renderAlert(result) {
-    if (result.level === "No alert") return;
+    if (result.level === "No alert") {
+      removeAlert();
+      return;
+    }
 
     ensureAlert();
+
     const panel = shadowRoot.querySelector(".cfx-panel");
     panel.dataset.level = result.level.toLowerCase();
 
     shadowRoot.querySelector(".cfx-level").textContent =
       `${result.level} risk · Score ${result.score}`;
+
     shadowRoot.querySelector(".cfx-summary").textContent =
-      result.fakeCaptcha && result.hasOSOrCommandEvidence
-        ? "This page combines verification-style content with instructions to interact with Windows or run commands."
-        : "Suspicious page behavior was found. Review the evidence before proceeding.";
+      result.hasClickFixCombination
+        ? "This page combines verification-style content with instructions to interact with Windows or execute commands."
+        : "Suspicious command instructions and inline script indicators were found. Review the page carefully.";
 
     const list = shadowRoot.querySelector(".cfx-evidence");
     list.replaceChildren();
+
     for (const item of result.evidence) {
       const li = document.createElement("li");
       li.textContent = item.label;
@@ -220,32 +285,28 @@
     }
   }
 
-  async function autoClearClipboard(result) {
-    // Only act when a verification-style page and OS/command instructions occur together.
-    // One attempt per document prevents repeated clipboard writes from DOM mutations.
-    if (clipboardClearAttempted) return;
-    if (!result.fakeCaptcha || !result.hasOSOrCommandEvidence) return;
+  async function clearClipboardFromUserAction(event) {
+    const button = event.currentTarget;
+    const note = shadowRoot?.querySelector(".cfx-note");
+    if (!button || !note) return;
 
-    const ids = new Set(result.evidence.map(item => item.id));
-    const hasConcreteOSInstruction =
-      ids.has("os-shortcut") || ids.has("open-system-tool");
-    const hasCommandInstruction =
-      ids.has("paste-command") || ids.has("execution-language");
+    button.disabled = true;
+    button.textContent = "Clearing…";
 
-    // Stronger threshold: fake verification plus a Windows/system-tool instruction,
-    // and either paste/execute wording or a Windows shortcut explicitly present.
-    if (!hasConcreteOSInstruction || !(hasCommandInstruction || ids.has("os-shortcut"))) return;
-
-    clipboardClearAttempted = true;
     try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("Clipboard API is unavailable in this page context.");
+      }
+
       await navigator.clipboard.writeText("");
-      console.warn("[ClickFix Guard] Clipboard text cleared automatically after strong ClickFix indicators.");
-      const note = shadowRoot?.querySelector(".cfx-note");
-      if (note) note.textContent = "Clipboard text was cleared automatically after strong ClickFix indicators were detected.";
+      note.textContent = "Clipboard text was cleared.";
+      button.textContent = "Clipboard cleared";
     } catch (error) {
-      console.warn("[ClickFix Guard] Automatic clipboard clearing was blocked by the browser:", error);
-      const note = shadowRoot?.querySelector(".cfx-note");
-      if (note) note.textContent = "ClickFix indicators detected, but the browser blocked automatic clipboard clearing. Clear it manually if needed.";
+      console.warn("[ClickFix Guard] Clipboard clearing failed:", error);
+      note.textContent =
+        "The browser blocked clipboard clearing. You can clear it manually using your device's clipboard controls.";
+      button.textContent = "Could not clear";
+      button.disabled = false;
     }
   }
 
@@ -253,28 +314,38 @@
     scanTimer = null;
     if (!document.documentElement) return;
 
-    const text = safeText();
-    const scripts = getPageScripts();
-    const result = collectEvidence(text, scripts);
+    const result = collectEvidence(getPageText(), getInlineScripts());
 
     const signature = JSON.stringify({
       score: result.score,
       level: result.level,
-      evidence: result.evidence.map(x => x.id)
+      evidence: result.evidence.map(item => item.id)
     });
 
     if (signature !== lastSignature) {
       lastSignature = signature;
-      if (result.level !== "No alert") renderAlert(result);
-      if (result.level === "High" || (result.fakeCaptcha && result.hasOSOrCommandEvidence)) {
-        void autoClearClipboard(result);
+      if (dismissedSignature && dismissedSignature !== signature) {
+        dismissedSignature = "";
       }
-      // If an earlier scan alerted but the page no longer matches, remove the alert.
-      else if (alertNode) {
-        alertNode.remove();
-        alertNode = null;
-        shadowRoot = null;
-      }
+    }
+
+    if (result.level === "No alert") {
+      if (alertNode) removeAlert();
+      lastRenderedSignature = "";
+      dismissedSignature = "";
+      return;
+    }
+
+    // Keep a dismissed warning hidden until the detection evidence changes.
+    if (dismissedSignature === signature) {
+      if (alertNode) removeAlert();
+      return;
+    }
+
+    // Restore the warning if the webpage removes it, or refresh it when evidence changes.
+    if (!alertNode?.isConnected || !shadowRoot || signature !== lastRenderedSignature) {
+      renderAlert(result);
+      lastRenderedSignature = signature;
     }
   }
 
@@ -283,32 +354,31 @@
     scanTimer = setTimeout(scan, CONFIG.debounceMs);
   }
 
-  // Scan immediately, including pages that inject the overlay after initial load.
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", scan, { once: true });
-  } else {
-    scan();
+  function startObserver() {
+    if (observer || !document.documentElement) return;
+
+    observer = new MutationObserver(scheduleScan);
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      characterData: true
+    });
   }
 
-  // Observe dynamically added overlays and changed text without waiting for a click.
-  const observer = new MutationObserver(scheduleScan);
-  const startObserver = () => {
-    if (document.documentElement) {
-      observer.observe(document.documentElement, {
-        childList: true,
-        subtree: true,
-        characterData: true
-      });
-    }
-  };
-  startObserver();
+  // At document_start, documentElement may not exist yet.
+  if (document.documentElement) {
+    startObserver();
+  } else {
+    document.addEventListener("DOMContentLoaded", startObserver, { once: true });
+  }
 
-  // SPA navigations can change URL/content without a full reload.
-  let previousUrl = location.href;
-  setInterval(() => {
-    if (location.href !== previousUrl) {
-      previousUrl = location.href;
-      scheduleScan();
-    }
-  }, 1000);
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", scheduleScan, { once: true });
+  } else {
+    scheduleScan();
+  }
+
+  // Re-scan after browser history navigation and hash-based SPA navigation.
+  window.addEventListener("popstate", scheduleScan);
+  window.addEventListener("hashchange", scheduleScan);
 })();
