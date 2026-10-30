@@ -1,4 +1,4 @@
- ClickFix Guard 
+# ClickFix Guard 
 
 ## What it does
 
@@ -40,7 +40,7 @@ A user's own Ctrl+C is never analysed, unless the page replaces the selected tex
 
 Separately, the page scanner (`content.js`) rates the page itself as Review, Medium or High from the overlay, page text and loader evidence. A blocked copy counts as High, a warned copy as Medium. The highest level wins.
 
-##Demo
+## Demo
 ![Video](https://github.com/frameman/det-clickfix-web-extension/blob/main/demo.gif)
 
 
